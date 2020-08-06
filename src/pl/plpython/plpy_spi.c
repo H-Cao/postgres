@@ -28,9 +28,19 @@
 #include "plpy_procedure.h"
 #include "plpy_resultobject.h"
 
+#include "numpy/npy_common.h"
+#include "numpy/ndarrayobject.h"
+#include "numpy/arrayobject.h"
+
+static int init_numpy(){
+    return _import_array();
+}
 
 static PyObject *PLy_spi_execute_query(char *query, long limit);
+static PyObject *PLy_spi_execute_query_and_convert_to_columns(char *query, long limit);
 static PyObject *PLy_spi_execute_fetch_result(SPITupleTable *tuptable,
+											  uint64 rows, int status);
+static PyObject *PLy_spi_execute_fetch_result_and_convert_to_columns(SPITupleTable *tuptable, 
 											  uint64 rows, int status);
 static void PLy_spi_exception_set(PyObject *excclass, ErrorData *edata);
 
@@ -177,6 +187,22 @@ PLy_spi_execute(PyObject *self, PyObject *args)
 	return NULL;
 }
 
+/* execute_and_convert_to_columns(query="select * from foo", limit=5)
+ */
+PyObject *
+PLy_spi_execute_and_convert_to_columns(PyObject *self, PyObject *args)
+{
+    char	   *query;
+	long		limit = 0;
+
+	if (PyArg_ParseTuple(args, "s|l", &query, &limit))
+		return PLy_spi_execute_query_and_convert_to_columns(query, limit);
+
+	PyErr_Clear();
+	PLy_exception_set(PLy_exc_error, "plpy.execute_and_convert_to_columns expected a query");
+	return NULL;
+}
+
 PyObject *
 PLy_spi_execute_plan(PyObject *ob, PyObject *list, long limit)
 {
@@ -236,7 +262,7 @@ PLy_spi_execute_plan(PyObject *ob, PyObject *list, long limit)
 		else
 			nulls = NULL;
 
-		for (j = 0; j < nargs; j++)
+			for (j = 0; j < nargs; j++)
 		{
 			PLyObToDatum *arg = &plan->args[j];
 			PyObject   *elem;
@@ -330,6 +356,48 @@ PLy_spi_execute_query(char *query, long limit)
 		pg_verifymbstr(query, strlen(query), false);
 		rv = SPI_execute(query, exec_ctx->curr_proc->fn_readonly, limit);
 		ret = PLy_spi_execute_fetch_result(SPI_tuptable, SPI_processed, rv);
+
+		PLy_spi_subtransaction_commit(oldcontext, oldowner);
+	}
+	PG_CATCH();
+	{
+		PLy_spi_subtransaction_abort(oldcontext, oldowner);
+		return NULL;
+	}
+	PG_END_TRY();
+
+	if (rv < 0)
+	{
+		Py_XDECREF(ret);
+		PLy_exception_set(PLy_exc_spi_error,
+						  "SPI_execute failed: %s",
+						  SPI_result_code_string(rv));
+		return NULL;
+	}
+
+	return ret;
+}
+
+static PyObject *
+PLy_spi_execute_query_and_convert_to_columns(char *query, long limit)
+{
+	int			rv;
+	volatile MemoryContext oldcontext;
+	volatile ResourceOwner oldowner;
+	PyObject   *ret = NULL;
+
+	oldcontext = CurrentMemoryContext;
+	oldowner = CurrentResourceOwner;
+
+	PLy_spi_subtransaction_begin(oldcontext, oldowner);
+
+	PG_TRY();
+	{
+		PLyExecutionContext *exec_ctx = PLy_current_execution_context();
+
+		pg_verifymbstr(query, strlen(query), false);
+		rv = SPI_execute(query, exec_ctx->curr_proc->fn_readonly, limit);
+		ret = PLy_spi_execute_fetch_result_and_convert_to_columns(SPI_tuptable, SPI_processed, rv);
 
 		PLy_spi_subtransaction_commit(oldcontext, oldowner);
 	}
@@ -457,6 +525,171 @@ PLy_spi_execute_fetch_result(SPITupleTable *tuptable, uint64 rows, int status)
 			Py_DECREF(result);
 			result = NULL;
 		}
+	}
+
+	return (PyObject *) result;
+}
+
+static PyObject *
+PLy_spi_execute_fetch_result_and_convert_to_columns(SPITupleTable *tuptable, uint64 rows, int status)
+{
+	PyObject *result;
+	int cols;
+	
+	PLyExecutionContext *exec_ctx = PLy_current_execution_context();
+	volatile MemoryContext oldcontext;
+	result = PyDict_New();
+
+	/* in case PyDict_New() failed above */
+	if (!result)
+	{
+		SPI_freetuptable(tuptable);
+		return NULL;
+	}
+
+	/* in case no row sets are returned */
+	if (tuptable==NULL)
+	{
+		SPI_freetuptable(tuptable);
+		return result;
+	}
+
+
+	if (status > 0 && tuptable != NULL)
+	{
+		PLyDatumToOb ininfo;
+		MemoryContext cxt;
+
+		cxt = AllocSetContextCreate(CurrentMemoryContext,
+									"PL/Python temp context",
+									ALLOCSET_DEFAULT_SIZES);
+
+		/* Initialize for converting result tuples to Python */
+		PLy_input_setup_func(&ininfo, cxt, RECORDOID, -1,
+							 exec_ctx->curr_proc);
+
+		oldcontext = CurrentMemoryContext;
+		PG_TRY();
+		{
+            cols = tuptable->tupdesc->natts;
+			if (rows)
+			{
+				uint64		i;
+
+				/*
+				 * PyList_New() and PyList_SetItem() use Py_ssize_t for list
+				 * size and list indices; so we cannot support a result larger
+				 * than PY_SSIZE_T_MAX.
+				 */
+				if (rows > (uint64) PY_SSIZE_T_MAX)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("query result has too many rows to fit in a Python list")));
+
+
+				PLy_input_setup_tuple(&ininfo, tuptable->tupdesc,
+										  exec_ctx->curr_proc);
+
+			    if (cols)
+			    {
+				    uint64		j;
+                    /* python decimal class */
+                    PyObject *decimal_mod = PyImport_ImportModule("decimal");
+                    PyObject *decimal_cls = PyObject_GetAttrString(decimal_mod, "Decimal");
+                    /* init numpy */
+                    int not_init_numpy =  init_numpy();
+                    
+                    PyObject *col_lists = PyList_New( (Py_ssize_t)cols );
+
+                    if(not_init_numpy)
+                    {
+                        /* numpy is not initiated */
+                        PLy_elog(LOG, "numpy is not initiated");
+                    }
+
+                    
+
+                    for (j = 0; j < cols; j++)
+                    {
+                        PyObject *col_list = PyList_New( (Py_ssize_t)rows );
+                        PyList_SetItem(col_lists, j, col_list);
+                    }
+
+				    for (i = 0; i < rows; i++)
+				    {
+					    PyObject   *row = PLy_input_from_tuple(&ininfo,
+														tuptable->vals[i],
+                                                        tuptable->tupdesc,
+                                                        true);
+
+                        for (j = 0; j < cols; j++)
+                        {
+                            Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
+                            PyObject *key = PyString_FromString(NameStr(attr->attname));
+                            PyObject *col_list = PyList_GetItem(col_lists, j);
+                            PyObject *data = PyDict_GetItem(row, key);
+                            Py_INCREF(data);
+                            PyList_SetItem(col_list, i, data);
+                            Py_DECREF(key);
+                        }
+                        Py_DECREF(row);
+                    }
+
+                    for (j = 0; j < cols; j++)
+                    {
+					    PyObject *arr;
+                        Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
+                        PyObject *key = PyString_FromString(NameStr(attr->attname));
+                        PyObject *col_list = PyList_GetItem(col_lists, j);
+                        PyObject *first_element = PyList_GetItem(col_list, 0);
+                        Py_INCREF(col_list);
+                        
+            			if(PyLong_Check(first_element))
+						{
+                			arr = PyArray_FROM_OTF(col_list, NPY_INT64, NPY_IN_ARRAY);
+            			}else if(PyFloat_Check(first_element) || PyObject_IsInstance(first_element, decimal_cls))
+						{
+                			arr = PyArray_FROM_OTF(col_list, NPY_FLOAT64, NPY_IN_ARRAY);
+            			}else
+						{
+                			arr = PyArray_FROM_OTF(col_list, NPY_OBJECT, NPY_IN_ARRAY);
+            			}
+                        
+        			    PyDict_SetItem(result, key, arr);
+                        Py_DECREF(key);
+                        Py_DECREF(arr);
+                        Py_DECREF(col_list);
+        			}
+                    Py_DECREF(decimal_mod);
+                    Py_DECREF(decimal_cls);
+                    Py_DECREF(col_lists);
+
+				}
+			}else{
+                uint64 j;
+                for (j = 0; j < cols; j++)
+				{
+					PyObject *arr = PyList_New(0);
+					Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
+					PyObject *key = PyString_FromString(NameStr(attr->attname));
+        			
+        			PyDict_SetItem(result, key, arr);
+                    Py_DECREF(key);
+                    Py_DECREF(arr);
+				}
+            }
+		}
+		PG_CATCH();
+		{
+			MemoryContextSwitchTo(oldcontext);
+			MemoryContextDelete(cxt);
+			Py_DECREF(result);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		MemoryContextDelete(cxt);
+		SPI_freetuptable(tuptable);
 	}
 
 	return (PyObject *) result;

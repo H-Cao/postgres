@@ -82,6 +82,7 @@ static PyMethodDef PLy_methods[] = {
 	 * execute a plan or query
 	 */
 	{"execute", PLy_spi_execute, METH_VARARGS, NULL},
+	{"execute_and_convert_to_columns", PLy_spi_execute_and_convert_to_columns, METH_VARARGS, NULL},
 
 	/*
 	 * escaping strings

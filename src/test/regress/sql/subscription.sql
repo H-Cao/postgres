@@ -109,8 +109,6 @@ COMMIT;
 
 ALTER SUBSCRIPTION regress_testsub SET (slot_name = NONE);
 
-\dRs+
-
 -- now it works
 BEGIN;
 DROP SUBSCRIPTION regress_testsub;

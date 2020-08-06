@@ -20,8 +20,6 @@
 #include "access/htup_details.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
-#include "catalog/pg_subscription.h"
-#include "catalog/pg_subscription_rel.h"
 #include "executor/executor.h"
 #include "utils/rel.h"
 
@@ -170,53 +168,6 @@ CatalogIndexInsert(CatalogIndexState indstate, HeapTuple heapTuple)
 }
 
 /*
- * Subroutine to verify that catalog constraints are honored.
- *
- * Tuples inserted via CatalogTupleInsert/CatalogTupleUpdate are generally
- * "hand made", so that it's possible that they fail to satisfy constraints
- * that would be checked if they were being inserted by the executor.  That's
- * a coding error, so we only bother to check for it in assert-enabled builds.
- */
-#ifdef USE_ASSERT_CHECKING
-
-static void
-CatalogTupleCheckConstraints(Relation heapRel, HeapTuple tup)
-{
-	/*
-	 * Currently, the only constraints implemented for system catalogs are
-	 * attnotnull constraints.
-	 */
-	if (HeapTupleHasNulls(tup))
-	{
-		TupleDesc	tupdesc = RelationGetDescr(heapRel);
-		bits8	   *bp = tup->t_data->t_bits;
-
-		for (int attnum = 0; attnum < tupdesc->natts; attnum++)
-		{
-			Form_pg_attribute thisatt = TupleDescAttr(tupdesc, attnum);
-
-			/*
-			 * Through an embarrassing oversight, pre-v13 installations have
-			 * pg_subscription.subslotname and pg_subscription_rel.srsublsn
-			 * marked as attnotnull, which they should not be.  Ignore those
-			 * flags.
-			 */
-			Assert(!(thisatt->attnotnull && att_isnull(attnum, bp) &&
-					 !((thisatt->attrelid == SubscriptionRelationId &&
-						thisatt->attnum == Anum_pg_subscription_subslotname) ||
-					   (thisatt->attrelid == SubscriptionRelRelationId &&
-						thisatt->attnum == Anum_pg_subscription_rel_srsublsn))));
-		}
-	}
-}
-
-#else							/* !USE_ASSERT_CHECKING */
-
-#define CatalogTupleCheckConstraints(heapRel, tup)  ((void) 0)
-
-#endif							/* USE_ASSERT_CHECKING */
-
-/*
  * CatalogTupleInsert - do heap and indexing work for a new catalog tuple
  *
  * Insert the tuple data in "tup" into the specified catalog relation.
@@ -232,8 +183,6 @@ void
 CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 {
 	CatalogIndexState indstate;
-
-	CatalogTupleCheckConstraints(heapRel, tup);
 
 	indstate = CatalogOpenIndexes(heapRel);
 
@@ -255,8 +204,6 @@ void
 CatalogTupleInsertWithInfo(Relation heapRel, HeapTuple tup,
 						   CatalogIndexState indstate)
 {
-	CatalogTupleCheckConstraints(heapRel, tup);
-
 	simple_heap_insert(heapRel, tup);
 
 	CatalogIndexInsert(indstate, tup);
@@ -278,8 +225,6 @@ CatalogTupleUpdate(Relation heapRel, ItemPointer otid, HeapTuple tup)
 {
 	CatalogIndexState indstate;
 
-	CatalogTupleCheckConstraints(heapRel, tup);
-
 	indstate = CatalogOpenIndexes(heapRel);
 
 	simple_heap_update(heapRel, otid, tup);
@@ -300,8 +245,6 @@ void
 CatalogTupleUpdateWithInfo(Relation heapRel, ItemPointer otid, HeapTuple tup,
 						   CatalogIndexState indstate)
 {
-	CatalogTupleCheckConstraints(heapRel, tup);
-
 	simple_heap_update(heapRel, otid, tup);
 
 	CatalogIndexInsert(indstate, tup);

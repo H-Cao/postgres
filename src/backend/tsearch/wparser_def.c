@@ -2010,14 +2010,24 @@ checkcondition_HL(void *opaque, QueryOperand *val, ExecPhraseData *data)
  * Returns -1 if no such index
  */
 static int
-hlFirstIndex(HeadlineParsedText *prs, int pos)
+hlFirstIndex(HeadlineParsedText *prs, TSQuery query, int pos)
 {
 	int			i;
 
+	/* For each word ... */
 	for (i = pos; i < prs->curwords; i++)
 	{
-		if (prs->words[i].item != NULL)
-			return i;
+		/* ... scan the query to see if this word matches any operand */
+		QueryItem  *item = GETQUERY(query);
+		int			j;
+
+		for (j = 0; j < query->size; j++)
+		{
+			if (item->type == QI_VAL &&
+				prs->words[i].item == &item->qoperand)
+				return i;
+			item++;
+		}
 	}
 	return -1;
 }
@@ -2025,14 +2035,8 @@ hlFirstIndex(HeadlineParsedText *prs, int pos)
 /*
  * hlCover: try to find a substring of prs' word list that satisfies query
  *
- * At entry, *p must be the first word index to consider (initialize this
- * to zero, or to the next index after a previous successful search).
- * We will consider all substrings starting at or after that word, and
- * containing no more than max_cover words.  (We need a length limit to
- * keep this from taking O(N^2) time for a long document with many query
- * words but few complete matches.  Actually, since checkcondition_HL is
- * roughly O(N) in the length of the substring being checked, it's even
- * worse than that.)
+ * At entry, *p must be the first word index to consider (initialize this to
+ * zero, or to the next index after a previous successful search).
  *
  * On success, sets *p to first word index and *q to last word index of the
  * cover substring, and returns true.
@@ -2041,8 +2045,7 @@ hlFirstIndex(HeadlineParsedText *prs, int pos)
  * words used in the query.
  */
 static bool
-hlCover(HeadlineParsedText *prs, TSQuery query, int max_cover,
-		int *p, int *q)
+hlCover(HeadlineParsedText *prs, TSQuery query, int *p, int *q)
 {
 	int			pmin,
 				pmax,
@@ -2056,7 +2059,7 @@ hlCover(HeadlineParsedText *prs, TSQuery query, int max_cover,
 	 * appearing in the query; there's no point in trying endpoints in between
 	 * such points.
 	 */
-	pmin = hlFirstIndex(prs, *p);
+	pmin = hlFirstIndex(prs, query, *p);
 	while (pmin >= 0)
 	{
 		/* This useless assignment just keeps stupider compilers quiet */
@@ -2077,7 +2080,7 @@ hlCover(HeadlineParsedText *prs, TSQuery query, int max_cover,
 				return true;
 			}
 			/* Nope, so advance pmax to next feasible endpoint */
-			nextpmax = hlFirstIndex(prs, pmax + 1);
+			nextpmax = hlFirstIndex(prs, query, pmax + 1);
 
 			/*
 			 * If this is our first advance past pmin, then the result is also
@@ -2088,7 +2091,7 @@ hlCover(HeadlineParsedText *prs, TSQuery query, int max_cover,
 				nextpmin = nextpmax;
 			pmax = nextpmax;
 		}
-		while (pmax >= 0 && pmax - pmin < max_cover);
+		while (pmax >= 0);
 		/* No luck here, so try next feasible startpoint */
 		pmin = nextpmin;
 	}
@@ -2190,7 +2193,7 @@ get_next_fragment(HeadlineParsedText *prs, int *startpos, int *endpos,
 static void
 mark_hl_fragments(HeadlineParsedText *prs, TSQuery query, bool highlightall,
 				  int shortword, int min_words,
-				  int max_words, int max_fragments, int max_cover)
+				  int max_words, int max_fragments)
 {
 	int32		poslen,
 				curlen,
@@ -2217,7 +2220,7 @@ mark_hl_fragments(HeadlineParsedText *prs, TSQuery query, bool highlightall,
 	covers = palloc(maxcovers * sizeof(CoverPos));
 
 	/* get all covers */
-	while (hlCover(prs, query, max_cover, &p, &q))
+	while (hlCover(prs, query, &p, &q))
 	{
 		startpos = p;
 		endpos = q;
@@ -2372,7 +2375,7 @@ mark_hl_fragments(HeadlineParsedText *prs, TSQuery query, bool highlightall,
  */
 static void
 mark_hl_words(HeadlineParsedText *prs, TSQuery query, bool highlightall,
-			  int shortword, int min_words, int max_words, int max_cover)
+			  int shortword, int min_words, int max_words)
 {
 	int			p = 0,
 				q = 0;
@@ -2390,7 +2393,7 @@ mark_hl_words(HeadlineParsedText *prs, TSQuery query, bool highlightall,
 	if (!highlightall)
 	{
 		/* examine all covers, select a headline using the best one */
-		while (hlCover(prs, query, max_cover, &p, &q))
+		while (hlCover(prs, query, &p, &q))
 		{
 			/*
 			 * Count words (curlen) and interesting words (poslen) within
@@ -2546,7 +2549,6 @@ prsd_headline(PG_FUNCTION_ARGS)
 	int			shortword = 3;
 	int			max_fragments = 0;
 	bool		highlightall = false;
-	int			max_cover;
 	ListCell   *l;
 
 	/* Extract configuration option values */
@@ -2586,15 +2588,6 @@ prsd_headline(PG_FUNCTION_ARGS)
 							defel->defname)));
 	}
 
-	/*
-	 * We might eventually make max_cover a user-settable parameter, but for
-	 * now, just compute a reasonable value based on max_words and
-	 * max_fragments.
-	 */
-	max_cover = Max(max_words * 10, 100);
-	if (max_fragments > 0)
-		max_cover *= max_fragments;
-
 	/* in HighlightAll mode these parameters are ignored */
 	if (!highlightall)
 	{
@@ -2619,10 +2612,10 @@ prsd_headline(PG_FUNCTION_ARGS)
 	/* Apply appropriate headline selector */
 	if (max_fragments == 0)
 		mark_hl_words(prs, query, highlightall, shortword,
-					  min_words, max_words, max_cover);
+					  min_words, max_words);
 	else
 		mark_hl_fragments(prs, query, highlightall, shortword,
-						  min_words, max_words, max_fragments, max_cover);
+						  min_words, max_words, max_fragments);
 
 	/* Fill in default values for string options */
 	if (!prs->startsel)

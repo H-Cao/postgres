@@ -1496,17 +1496,23 @@ select jsonb_path_query('"1.23"', '$.double()');
 (1 row)
 
 select jsonb_path_query('"1.23aaa"', '$.double()');
-ERROR:  string argument of jsonpath item method .double() is not a valid representation of a double precision number
-select jsonb_path_query('1e1000', '$.double()');
-ERROR:  numeric argument of jsonpath item method .double() is out of range for type double precision
+ERROR:  jsonpath item method .double() can only be applied to a numeric value
 select jsonb_path_query('"nan"', '$.double()');
-ERROR:  string argument of jsonpath item method .double() is not a valid representation of a double precision number
+ jsonb_path_query 
+------------------
+ "NaN"
+(1 row)
+
 select jsonb_path_query('"NaN"', '$.double()');
-ERROR:  string argument of jsonpath item method .double() is not a valid representation of a double precision number
+ jsonb_path_query 
+------------------
+ "NaN"
+(1 row)
+
 select jsonb_path_query('"inf"', '$.double()');
-ERROR:  string argument of jsonpath item method .double() is not a valid representation of a double precision number
+ERROR:  jsonpath item method .double() can only be applied to a numeric value
 select jsonb_path_query('"-inf"', '$.double()');
-ERROR:  string argument of jsonpath item method .double() is not a valid representation of a double precision number
+ERROR:  jsonpath item method .double() can only be applied to a numeric value
 select jsonb_path_query('"inf"', '$.double()', silent => true);
  jsonb_path_query 
 ------------------
