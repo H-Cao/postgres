@@ -24,9 +24,9 @@ psql -d template1 -c  "CREATE LANGUAGE plpython3uC;"
 psql -d template1 -c "UPDATE pg_language SET lanpltrusted = true  WHERE lanname LIKE 'plpython3u';"
 ```
 
----
 
-## Orginal README File
+
+## Original README File
 
 <br>
 
