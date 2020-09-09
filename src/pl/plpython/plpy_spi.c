@@ -571,7 +571,7 @@ PLy_spi_execute_fetch_result_and_convert_to_columns(SPITupleTable *tuptable, uin
 		oldcontext = CurrentMemoryContext;
 		PG_TRY();
 		{
-            cols = tuptable->tupdesc->natts;
+			cols = tuptable->tupdesc->natts;
 			if (rows)
 			{
 				uint64		i;
@@ -589,95 +589,93 @@ PLy_spi_execute_fetch_result_and_convert_to_columns(SPITupleTable *tuptable, uin
 
 				PLy_input_setup_tuple(&ininfo, tuptable->tupdesc,
 										  exec_ctx->curr_proc);
-
-			    if (cols)
-			    {
+				
+				if (cols)
+				{
 				    uint64		j;
-                    /* python decimal class */
-                    PyObject *decimal_mod = PyImport_ImportModule("decimal");
-                    PyObject *decimal_cls = PyObject_GetAttrString(decimal_mod, "Decimal");
-                    /* init numpy */
-                    int not_init_numpy =  init_numpy();
-                    
-                    PyObject *col_lists = PyList_New( (Py_ssize_t)cols );
-
-                    if(not_init_numpy)
-                    {
-                        /* numpy is not initiated */
-                        PLy_elog(LOG, "numpy is not initiated");
+					
+					/* python decimal class */
+					PyObject *decimal_mod = PyImport_ImportModule("decimal");
+					PyObject *decimal_cls = PyObject_GetAttrString(decimal_mod, "Decimal");
+					
+					/* init numpy */
+					int not_init_numpy =  init_numpy();
+					
+					PyObject *col_lists = PyList_New( (Py_ssize_t)cols );
+					PyObject *col_keys = PyList_New( (Py_ssize_t)cols );
+					
+					
+					if(not_init_numpy)
+					{
+						/* numpy is not initiated */
+						PLy_elog(LOG, "numpy is not initiated");
+					}
+					
+					for (j = 0; j < cols; j++)
+					{
+						Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
+						PyObject *key = PyString_FromString(NameStr(attr->attname));
+						PyObject *col_list = PyList_New( (Py_ssize_t)rows );
+						
+						PyList_SetItem(col_lists, j, col_list);
+						PyList_SetItem(col_keys, j, key);
                     }
+					
 
-                    
-
-                    for (j = 0; j < cols; j++)
-                    {
-                        PyObject *col_list = PyList_New( (Py_ssize_t)rows );
-                        PyList_SetItem(col_lists, j, col_list);
-                    }
-
-				    for (i = 0; i < rows; i++)
-				    {
-					    PyObject   *row = PLy_input_from_tuple(&ininfo,
-														tuptable->vals[i],
-                                                        tuptable->tupdesc,
-                                                        true);
-
-                        for (j = 0; j < cols; j++)
-                        {
-                            Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
-                            PyObject *key = PyString_FromString(NameStr(attr->attname));
-                            PyObject *col_list = PyList_GetItem(col_lists, j);
-                            PyObject *data = PyDict_GetItem(row, key);
-                            Py_INCREF(data);
-                            PyList_SetItem(col_list, i, data);
-                            Py_DECREF(key);
-                        }
-                        Py_DECREF(row);
-                    }
-
-                    for (j = 0; j < cols; j++)
-                    {
-					    PyObject *arr;
-                        Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
-                        PyObject *key = PyString_FromString(NameStr(attr->attname));
-                        PyObject *col_list = PyList_GetItem(col_lists, j);
-                        PyObject *first_element = PyList_GetItem(col_list, 0);
-                        Py_INCREF(col_list);
-                        
-            			if(PyLong_Check(first_element))
+					for (i = 0; i < rows; i++)
+					{
+						PyObject   *row = PLy_input_from_tuple(&ininfo,
+															tuptable->vals[i],
+															tuptable->tupdesc,
+															true);
+															
+						for (j = 0; j < cols; j++)
 						{
-                			arr = PyArray_FROM_OTF(col_list, NPY_INT64, NPY_IN_ARRAY);
-            			}else if(PyFloat_Check(first_element) || PyObject_IsInstance(first_element, decimal_cls))
-						{
-                			arr = PyArray_FROM_OTF(col_list, NPY_FLOAT64, NPY_IN_ARRAY);
-            			}else
-						{
-                			arr = PyArray_FROM_OTF(col_list, NPY_OBJECT, NPY_IN_ARRAY);
-            			}
-                        
-        			    PyDict_SetItem(result, key, arr);
-                        Py_DECREF(key);
-                        Py_DECREF(arr);
+							PyObject *col_list = PyList_GetItem(col_lists, j);
+							PyObject *key= PyList_GetItem(col_keys, j);
+							PyObject *data = PyDict_GetItem(row, key);
+							Py_INCREF(data);
+							PyList_SetItem(col_list, i, data);
+
+						}
+						Py_DECREF(row);
+					}
+					
+					for (j = 0; j < cols; j++)
+					{
+						PyObject *arr;
+						PyObject *key= PyList_GetItem(col_keys, j);
+						PyObject *col_list = PyList_GetItem(col_lists, j);
+						PyObject *first_element = PyList_GetItem(col_list, 0);
+						Py_INCREF(col_list);
+						
+						if(PyLong_Check(first_element)){
+							arr = PyArray_FROM_OTF(col_list, NPY_INT64, NPY_IN_ARRAY);
+						}else if(PyFloat_Check(first_element) || PyObject_IsInstance(first_element, decimal_cls)){
+							arr = PyArray_FROM_OTF(col_list, NPY_FLOAT64, NPY_IN_ARRAY);
+						}else{
+							arr = PyArray_FROM_OTF(col_list, NPY_OBJECT, NPY_IN_ARRAY);
+						}
+						
+						PyDict_SetItem(result, key, arr);
+						Py_DECREF(arr);
                         Py_DECREF(col_list);
         			}
-                    Py_DECREF(decimal_mod);
-                    Py_DECREF(decimal_cls);
-                    Py_DECREF(col_lists);
-
+					Py_DECREF(decimal_mod);
+					Py_DECREF(decimal_cls);
+					Py_DECREF(col_lists);
 				}
 			}else{
-                uint64 j;
-                for (j = 0; j < cols; j++)
-				{
+				uint64 j;
+				for (j = 0; j < cols; j++){
 					PyObject *arr = PyList_New(0);
 					Form_pg_attribute attr = TupleDescAttr(tuptable->tupdesc, j);
 					PyObject *key = PyString_FromString(NameStr(attr->attname));
-        			
-        			PyDict_SetItem(result, key, arr);
-                    Py_DECREF(key);
-                    Py_DECREF(arr);
+					
+					PyDict_SetItem(result, key, arr);
+					Py_DECREF(arr);
 				}
-            }
+			}
 		}
 		PG_CATCH();
 		{
